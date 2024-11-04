@@ -1,0 +1,102 @@
+on:
+  workflow_call:
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      SSH_KEY_MANIFEST:
+        required: true
+    inputs:
+      ECR_NAME:
+        required: true
+        type: string
+        
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    outputs:
+      image: ${{ steps.build-image.outputs.image }}
+      image-tag: ${{ env.IMAGE_TAG }}
+
+    strategy:
+      matrix:
+        node-version: [20.x]
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Get short commit SHA
+      run: echo "IMAGE_TAG=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-2
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build and tag docker image
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ env.IMAGE_TAG }}
+      run: |
+        docker build -t $ECR_REGISTRY/${{inputs.ECR_NAME}}:$IMAGE_TAG .
+        echo "image=$ECR_REGISTRY/${{inputs.ECR_NAME}}:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@0.27.0
+      env:
+        TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db:2
+        TRIVY_JAVA_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-java-db:1
+      with:
+        image-ref: ${{ steps.build-image.outputs.image }}
+        format: 'table'
+        exit-code: '1'
+        ignore-unfixed: true
+        vuln-type: 'os,library'
+        severity: 'CRITICAL'
+
+    - name: Push image to Amazon ECR
+      id: push-image
+      if: success()
+      run: |
+        docker push ${{ steps.build-image.outputs.image }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+    - name: Configure SSH for repo access
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.SSH_KEY_MANIFEST }}
+
+    - name: Clone Kubernetes manifests repo
+      run: |
+        git clone --branch develop git@github.com:mauriciogutierrezm/poc-nuxt-frontend-manifest.git
+
+    - name: Update deployment.yaml with new image
+      run: |
+        cd poc-nuxt-frontend-manifest
+        sed -i 's|image: .*|image: '"${{ needs.build.outputs.image }}"'|' deployment.yaml
+      
+    - name: Commit and push Kubernetes manifests
+      run: |
+        cd poc-nuxt-frontend-manifest
+        git config --global user.email "Github Actions"
+        git config user.email "actions@github.com"
+        echo "Preparing to commit changes..."
+        git add deployment.yaml
+        git commit -m "Update image to new version ${{ needs.build.outputs.image-tag }}" || echo "No changes to commit"
+        echo "Pushing changes to develop branch..."
+        git push origin develop || echo "Push failed"
