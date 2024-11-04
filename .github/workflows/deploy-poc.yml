@@ -12,7 +12,6 @@ jobs:
   call-build-and-deploy:
     uses: ./.github/workflows/build-and-deploy.yml
     with:
-      SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
       ECR_NAME: poc-nuxt-frontend
     secrets:
       AWS_ACCESS_KEY_ID: ${{ secrets.POC_AWS_ACCESS_KEY_ID }}
