@@ -89,6 +89,7 @@ jobs:
       run: |
         cd poc-nuxt-frontend-manifest
         sed -i 's|image: .*|image: '"${{ needs.build.outputs.image }}"'|' deployment.yaml
+        cat deployment.yaml
       
     - name: Commit and push Kubernetes manifests
       run: |
